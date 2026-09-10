@@ -72,5 +72,15 @@ const snap = reg2.snapshot();
 ok(snap.github && Array.isArray(snap.github.candidates) && snap.github.candidates.length >= 2, '快照含各类候选（github 含直连/加速）');
 ok(reg2.set('npm', '').active === null && reg2.resolve('npm') === 'https://registry.npmjs.org', '清空选择后回退内置首选');
 
+
+// ---- LLM 重试策略换算 ----
+import { policyForMinutes, retriesForWindow, describePolicy } from '../lib/llm-retry.js';
+const p30 = policyForMinutes(30);
+ok(p30.mode === 'normal' && p30.maxRetries === 64, '30 分钟窗口 → maxRetries=64（1s 起、30s 封顶）');
+ok(p30.maxRetries * p30.maxDelayMs >= 30 * 60 * 1000 * 0.95, '累计退避覆盖 30 分钟量级');
+ok(retriesForWindow(60000, { initialDelayMs: 1000, maxDelayMs: 30000 }) === 6, '1 分钟窗口 → 6 次（1+2+4+8+16+30=61s）');
+ok(policyForMinutes(5).maxRetries < p30.maxRetries, '窗口越短次数越少（可配）');
+ok(describePolicy(p30).includes('max') === false && describePolicy(p30).includes('次数=64'), '描述含次数信息');
+
 console.log('\n结果: ' + pass + '/' + (pass + fail) + ' 通过');
 if (fail) process.exitCode = 1;
