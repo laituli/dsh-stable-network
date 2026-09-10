@@ -57,5 +57,20 @@ pg.begin(0); let step = pg.fail(50); ok(step.retry === true, '窗口内继续重
 step = pg.fail(200); ok(step.retry === false && step.reason === 'window-exhausted', '仅显式配置 giveUpAfterWindow 时窗口耗尽才停止');
 const rDefault = createRetryPolicy({}); ok(rDefault.state().windowMs === 1800000 && rDefault.state().giveUpAfterWindow === false, '默认：30 分钟窗口且不放弃');
 
+
+// ---- 镜像源信息（注入内存 IO）----
+import { createMirrorRegistry } from '../lib/mirrors.js';
+const mstore = { text: null };
+const reg = createMirrorRegistry({ io: { read: () => mstore.text, write: (t) => { mstore.text = t; } } });
+ok(reg.resolve('npm') === 'https://registry.npmjs.org', '未选择时用内置首选（npm 官方源）');
+const sel = reg.set('npm', 'npmmirror');
+ok(sel.ok === true && reg.resolve('npm') === 'https://registry.npmmirror.com', '切换到 npmmirror 生效');
+ok(typeof mstore.text === 'string' && mstore.text.includes('npmmirror'), '选择已持久化');
+const reg2 = createMirrorRegistry({ io: { read: () => mstore.text, write: (t) => { mstore.text = t; } } });
+ok(reg2.resolve('npm') === 'https://registry.npmmirror.com', '重启后仍记住选择');
+const snap = reg2.snapshot();
+ok(snap.github && Array.isArray(snap.github.candidates) && snap.github.candidates.length >= 2, '快照含各类候选（github 含直连/加速）');
+ok(reg2.set('npm', '').active === null && reg2.resolve('npm') === 'https://registry.npmjs.org', '清空选择后回退内置首选');
+
 console.log('\n结果: ' + pass + '/' + (pass + fail) + ' 通过');
 if (fail) process.exitCode = 1;
