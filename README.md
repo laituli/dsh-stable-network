@@ -44,6 +44,15 @@ dsh plugin --profile web add https://github.com/laituli/dsh-stable-network.git
 - `api.onRecovered(handler)`：注册“网络恢复”回调 —— 上层（如同步编排）在这里补做挂起项；
 - 状态里带 `pending` 计数；**探测/队列本身不执行任何网络动作、不反向依赖其它插件**。
 
+## 立场（重要，来自 issue laituli/dsh-personal#2）
+
+**网络波动不得导致 git 动作降级或跳过** —— 刚性要求是：
+
+- `networkState.runStrict(label, op)`：把动作**重试到成功为止**（默认 30 分钟窗口内不限次数，退避 1s→2s→…→30s 封顶；不放弃）；
+- 只有显式 `giveUpAfterWindow: true` 才会在窗口耗尽后返回失败，且此时**挂起项保留在队列里**（不被静默丢弃）；
+- 探测的退避只用于“少打几次”，**不是**“跳过工作”的许可；
+- 队列记录每一次严格动作：成功即移除，未成功即保留（重启后仍在）。
+
 ## 设计约束
 
 - 探测绝不阻断宿主或其它插件：全部 try/catch；

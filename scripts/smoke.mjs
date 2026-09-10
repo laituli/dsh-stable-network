@@ -38,5 +38,24 @@ const drained = q2.drain();
 ok(drained.length === 1 && q2.size() === 0, 'drain 取出全部并清空');
 q2.add('pull', null); ok(q2.remove(q2.list()[0].id) === true && q2.size() === 0, 'remove 可移除指定项');
 
+
+// ---- 严格重试（不降级）----
+import { runStrict, createRetryPolicy } from '../lib/retry.js';
+let sleeps = [];
+let n = 0;
+const r1 = await runStrict(async () => { n += 1; if (n < 3) throw new Error('flaky'); return 'pushed'; }, {
+  policy: { baseDelayMs: 10, maxDelayMs: 100, windowMs: 60000 },
+  sleep: async (ms) => { sleeps.push(ms); },
+});
+ok(r1.ok === true && r1.value === 'pushed' && r1.attempts === 2, '前两次失败、第三次成功 → 动作最终完成');
+ok(sleeps[0] === 10 && sleeps[1] === 20, '退避按 10→20 递增（不放弃）');
+const p = createRetryPolicy({ baseDelayMs: 1000, maxDelayMs: 8000 });
+p.begin(0); const d1 = p.fail(0).delayMs; const d2 = p.fail(0).delayMs; const d3 = p.fail(0).delayMs; const d4 = p.fail(0).delayMs;
+ok(d1 === 1000 && d2 === 2000 && d3 === 4000 && d4 === 8000, '退避 1s→2s→4s→8s 封顶');
+const pg = createRetryPolicy({ windowMs: 100, baseDelayMs: 10, giveUpAfterWindow: true });
+pg.begin(0); let step = pg.fail(50); ok(step.retry === true, '窗口内继续重试');
+step = pg.fail(200); ok(step.retry === false && step.reason === 'window-exhausted', '仅显式配置 giveUpAfterWindow 时窗口耗尽才停止');
+const rDefault = createRetryPolicy({}); ok(rDefault.state().windowMs === 1800000 && rDefault.state().giveUpAfterWindow === false, '默认：30 分钟窗口且不放弃');
+
 console.log('\n结果: ' + pass + '/' + (pass + fail) + ' 通过');
 if (fail) process.exitCode = 1;
