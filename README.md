@@ -37,6 +37,13 @@ dsh plugin --profile web add https://github.com/laituli/dsh-stable-network.git
 2. 冷重启后：`curl http://127.0.0.1:<端口>/dsh-stable-network/status` 应返回 `online/consecutiveFails/nextProbeAt/…`；
 3. 断网复现：把 `targets` 临时指向不可达地址（如 `127.0.0.1:1`）→ 连续 3 次失败应看到离线日志，且宿主与其它插件不受影响；恢复后打印「网络已恢复」。
 
+## 第二切片（已就绪）：离线挂起 + 恢复钩子
+
+- `api.enqueue(kind, label)`：网络不可达期间挂起待做项（落盘 `<DSH_HOME>/dsh-stable-network/pending.json`，重启后仍在）；
+- `api.pending() / pendingCount() / drainPending()`：查看与取出；
+- `api.onRecovered(handler)`：注册“网络恢复”回调 —— 上层（如同步编排）在这里补做挂起项；
+- 状态里带 `pending` 计数；**探测/队列本身不执行任何网络动作、不反向依赖其它插件**。
+
 ## 设计约束
 
 - 探测绝不阻断宿主或其它插件：全部 try/catch；

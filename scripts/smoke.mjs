@@ -23,5 +23,20 @@ ok(rec.recovered === true && b.state(t + 3000).online === true, '探测成功即
 ok(b.state(t + 3000).cooldownMs === 1000, '恢复后退避重置');
 ok(b.state(t + 3000).skipNetwork === false, '恢复后不再 skip 网络操作');
 
+
+// ---- 待处理队列（注入内存 IO，不落盘）----
+import { createPendingQueue } from '../lib/queue.js';
+const store = { text: null };
+const q = createPendingQueue({ io: { read: () => store.text, write: (t) => { store.text = t; } }, now: () => 5000 });
+ok(q.size() === 0, '队列初始为空');
+q.add('sync', 'github-sync');
+ok(q.size() === 1 && q.list()[0].kind === 'sync', '离线期间可挂起待做项');
+ok(typeof store.text === 'string' && store.text.includes('github-sync'), '挂起项已持久化（可注入 IO）');
+const q2 = createPendingQueue({ io: { read: () => store.text, write: (t) => { store.text = t; } } });
+ok(q2.size() === 1, '重启后从持久化恢复队列');
+const drained = q2.drain();
+ok(drained.length === 1 && q2.size() === 0, 'drain 取出全部并清空');
+q2.add('pull', null); ok(q2.remove(q2.list()[0].id) === true && q2.size() === 0, 'remove 可移除指定项');
+
 console.log('\n结果: ' + pass + '/' + (pass + fail) + ' 通过');
 if (fail) process.exitCode = 1;
