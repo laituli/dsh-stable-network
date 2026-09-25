@@ -55,36 +55,62 @@ echo "GIVING UP after 5 attempts"; exit 1
 - **不许无限重试**：要有次数或时间上界（否则一个被墙的目标会把整轮预算烧光）；
 - **重试之外要有第二姿势**：同一个 URL 重试 5 次和重试 50 次，成功率没有实质差别——见 §2。
 
-## 2. 本机最有用的一条经验：git 远端写不动时，改用 GitHub REST API
+## 2. git 远端写不动时：**只许读用 API，写只能等**
 
 这台机器上**常见**的现象是：`git clone/fetch/pull/push/ls-remote` 一律 reset/超时，
 而**同一时刻** `gh api` 是通的（两条链路不同）。
 
-| 想做的事 | 别做 | 改用 |
+### 红线：写远端**只有 git 直推**这一条
+
+> **分叉是不可接受的。** 两端必须停在**同一个 commit 号**上。
+> 任何"在远端另起一串提交"的写法（典型就是 Contents API，每个文件一个 commit）
+> 都会立刻制造分叉——**这是已发生过的真实事故，不是假想。**
+> push 不通时，**正确结果是"没推上去"**（阻塞），而不是"推上去了但是另一条历史"。
+
+| 想做的事 | 能用 API 吗 | 怎么做 |
 |---|---|---|
-| 读远端文件 | `git fetch` + `git show` | `gh api repos/<o>/<r>/contents/<path>`（加 `-H 'Accept: application/vnd.github.raw'`） |
-| 看远端提交 | `git ls-remote` | `gh api repos/<o>/<r>/git/ref/heads/<branch>` |
-| **写文件/发提交** | `git push`（会 exit 128） | `gh api --method PUT repos/<o>/<r>/contents/<path> --input -`（Contents API，见下） |
-| 触发 workflow | —— | `gh workflow run <file>.yml -R <o>/<r>` |
+| 读远端文件 / 提交 / ref | ✅ 首选 | `gh api repos/<o>/<r>/contents/<path>`（`-H 'Accept: application/vnd.github.raw'`）、`git/ref/heads/<b>`、`git/trees/<sha>?recursive=1` |
+| 触发 workflow | ✅ | `gh workflow run <file>.yml -R <o>/<r>` |
+| **写文件 / 发提交 / 打 tag / 改 ref** | ❌ **不许用 Contents API** | 只有 `git push`。不通就 **停手、报告、等链路恢复**（见 §5） |
 
-Contents API 发布一个文件（**用 Node 生成 JSON**，别在 shell 里手拼 base64）：
+为什么把 `git/ref` 也算"写"：ref 只能指向**远端已有**的对象。本地 commit 还没上传时
+`PATCH git/refs/heads/<b>` 会直接 `422 Object does not exist` ——**这条 422 正好证明了
+"没上传就没有写"**，别把它当成"换个姿势就能绕过去"。
 
-```bash
-node -e '
-const fs=require("fs"),{spawnSync}=require("child_process");
-const [repo,branch,repoPath,local,msg]=process.argv.slice(1);
-const body={message:msg,branch,content:fs.readFileSync(local).toString("base64")};
-try{body.sha=spawnSync("gh",["api",`repos/${repo}/contents/${repoPath}?ref=${branch}`,"--jq",".sha"],{encoding:"utf8"}).stdout.trim()}catch(e){}
-if(!body.sha)delete body.sha;
-spawnSync("gh",["api","--method","PUT",`repos/${repo}/contents/${repoPath}`,"--input","-"],{input:JSON.stringify(body),stdio:"inherit"});
-' <owner/repo> <branch> <path-in-repo> <local-file> <message>
-```
+### push 失败时的动作，只有三步
 
-**代价与收尾**（很重要，别把 API 发布当成免费的）：
+1. **有界退避重试**（§1 的纪律：2s→4s→8s，最多 3–5 次）。链路**会**自己恢复——
+   实测同一批命令先全部 reset/超时，几分钟后 `git ls-remote` 与 `git push --force` 又都通了；
+2. 还不通 → **停手**，把「本地 HEAD / 远端 HEAD / 失败的原文」写进报告，明确标成**未完成、已阻塞**；
+3. 等链路恢复后**先比号再推**：
 
-- 每个文件**一个 commit**、提交号与本地 `git commit` 不同 → 事后必须 `git fetch && git reset --hard origin/<branch>` 对齐本地；
-- **永远不要**用 API 发布之后又反向 `git push` 本地旧历史——那会把远端改动**回退**；
-- 能等到 git 恢复就等：`gh api` 发布适合"这一步等不起"的场合。
+   ```sh
+   git ls-remote origin <branch>     # 远端 SHA
+   git rev-parse HEAD                # 本地 SHA
+   ```
+
+   两个 40 位 SHA **完全相同**才算对齐。
+
+### 万一分叉已经发生了（这次就是这么修的）
+
+先判关系（本地 HEAD 与远端 HEAD 各自是不是对方的后代），再按情况处置：
+
+- **远端 HEAD 是本地 HEAD 的祖先** → 正常 `git push`（快进）；
+- **两者都不是对方的后代（真分叉）** → 以**本地那份为准**强制对齐，并**留下证据**：
+
+  ```sh
+  git push --force origin <branch>   # 传对象 + 强制更新 ref，一步到位
+  git ls-remote origin <branch>      # 必须等于 git rev-parse HEAD
+  ```
+
+  前提是工作区干净、且你确认本地树是权威的那份（逐文件比过）。
+  > 顺序很重要：`--force` 会先把对象传上去再更新 ref。先删 ref 再重建那条路走不通
+  > ——默认分支删不掉（`422 Cannot delete the default branch`）；反过来先 `PATCH git/ref`
+  > 又会 422，因为对象还没上传。**别绕，直接 `--force`。**
+
+修完把 tag 也重新指一次（旧 tag 可能还挂在作废的提交上）：
+`git tag -d <tag> && git tag -a <tag> -m … && git push origin <tag>`，
+然后 `git ls-remote origin 'refs/tags/<tag>*'` 看解引用行（`^{}`）是否等于目标 commit。
 
 ## 3. 挂起而不是丢掉：队列不是给你用的，但纪律是
 
@@ -111,6 +137,8 @@ spawnSync("gh",["api","--method","PUT",`repos/${repo}/contents/${repoPath}`,"--i
 
 - 目标在**另一台机器/另一个网络**里（云主机、容器）——你在这边测出来的通断对它没有效力，别替它下结论；
 - 连续 2 轮换姿势都失败 → 停下，把「试过什么、原文是什么、还差什么」交给使用方，而不是继续烧时间；
+- **写远端的动作（push / tag）不通 → 停在"未推送"这个状态本身就是合格结果**（见 §2）。
+  用换姿势的方式把它"推上去"会制造分叉，比分叉更糟的是**没人发现**；
 - 拿不准是网络还是权限 → 先 `curl -sS -o /dev/null -w '%{http_code}' https://api.github.com/user`：
   `200` = 链路通（那就是权限）；超时/reset = 链路（就是本条）。
 
