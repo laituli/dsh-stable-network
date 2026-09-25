@@ -37,6 +37,22 @@ dsh plugin --profile web add https://github.com/laituli/dsh-stable-network.git
 2. 冷重启后：`curl http://127.0.0.1:<端口>/dsh-stable-network/status` 应返回 `online/consecutiveFails/nextProbeAt/…`；
 3. 断网复现：把 `targets` 临时指向不可达地址（如 `127.0.0.1:1`）→ 连续 3 次失败应看到离线日志，且宿主与其它插件不受影响；恢复后打印「网络已恢复」。
 
+## 自带 skill：`troubleshoot-network`（v0.1.3 起）
+
+网络抖动时**先读到这一条**，而不是靠现场即兴。它治的正是"agent 遇到网络失败时不知道平台有这个插件"：
+
+- 装在 `skills/troubleshoot-network/`，由 `lib/index.js` 经 `ctx.inject(['skills'])` →
+  `ctx.skills.registerProvider()` 交给宿主（**不是**目录自动发现——DSH 没有那套；不注册就永远不出现）；
+- 触发词写在 `description` 里（逐字可搜：`Recv failure: Connection was reset`、
+  `Failed to connect to github.com port 443`、`could not read Username`、`curl: (28) Operation timed out`…）；
+- 正文给的是 **agent 真能执行**的东西：先 `curl -s http://127.0.0.1:<宿主端口>/dsh-stable-network/status`
+  看平台认不认这条链路 → 有界退避重试 → **git 远端写不动时改用 `gh api` Contents API 发布**（本机实测最有用的一条）；
+- **诚实边界**：`runStrict` / `enqueue` / `onRecovered` 是**宿主侧代码**调用的 API，DSH 没有把插件 service
+  暴露成 agent 工具，所以 skill 不承诺"自动补做"，只教纪律与替代姿势（正文有"别指望自动补做"一节）。
+
+验证：`node scripts/smoke.mjs` 含 skill 加载与宿主契约断言（provider 名 / `source` 是字符串 / invocation 双布尔 /
+触发词覆盖 / `get()` 现读正文），48/48。
+
 ## 第二切片（已就绪）：离线挂起 + 恢复钩子
 
 - `api.enqueue(kind, label)`：网络不可达期间挂起待做项（落盘 `<DSH_HOME>/dsh-stable-network/pending.json`，重启后仍在）；

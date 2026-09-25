@@ -82,5 +82,36 @@ ok(retriesForWindow(60000, { initialDelayMs: 1000, maxDelayMs: 30000 }) === 6, '
 ok(policyForMinutes(5).maxRetries < p30.maxRetries, '窗口越短次数越少（可配）');
 ok(describePolicy(p30).includes('max') === false && describePolicy(p30).includes('次数=64'), '描述含次数信息');
 
+// ---- skill bundle 加载与宿主契约 ----
+// 这一节守的是"包里的 skill 真能被宿主列出来并加载"——踩过的三个坑都在这里断言：
+//   · list()/get() 必须 async（宿主带 signal 时会对返回值 .then()）
+//   · source/provider 必须是字符串、invocation 两个布尔都要给全
+//   · name 必须 kebab-case 且等于目录名
+import { loadSkills, readSkillBundle, toCandidate, PROVIDER_NAME, SKILLS_DIR } from '../lib/skills.js';
+import { existsSync } from 'node:fs';
+
+const catalog = loadSkills();
+ok(catalog.length >= 1, `包内 skill 至少一个（实际 ${catalog.length}）`);
+const tn = catalog.find((s) => s.name === 'troubleshoot-network');
+ok(tn !== undefined, 'troubleshoot-network 在目录里');
+if (tn) {
+  ok(existsSync(SKILLS_DIR + '/' + tn.name + '/SKILL.md'), 'SKILL.md 在预期路径');
+  ok(tn.references.length >= 1 && tn.references.every((r) => r.bytes > 0), 'references 非空（空文件会让整包自检失败）');
+  const cand = toCandidate(tn);
+  ok(typeof cand.source === 'string' && typeof cand.provider === 'string', 'source/provider 是字符串（加载期契约）');
+  ok(cand.provider === PROVIDER_NAME, `provider 名 = ${PROVIDER_NAME}`);
+  ok(typeof cand.invocation.modelInvocable === 'boolean' && typeof cand.invocation.userInvocable === 'boolean', 'invocation 两个布尔都给全');
+  ok(typeof cand.rank === 'number', 'rank 是数字（让用户同名 skill 能覆盖我们）');
+  ok(cand.resourceBase && cand.resourceBase.kind === 'directory', '交 resourceBase 目录（相对路径据此解析）');
+  // 触发词必须真的写进 description（否则目录里搜不到）
+  const trig = `${tn.description}\n${tn.whenToUse ?? ''}`;
+  for (const needle of ['Recv failure: Connection was reset', 'Could not connect to server', 'failed to connect', 'operation timed out', 'i/o timeout']) {
+    const hit = trig.toLowerCase().includes(needle.toLowerCase());
+    ok(hit, `触发词覆盖：${needle}`);
+  }
+  const fresh = readSkillBundle(tn.baseDir);
+  ok(fresh.content.length > 500 && fresh.name === 'troubleshoot-network', 'get() 路径现读正文成功');
+}
+
 console.log('\n结果: ' + pass + '/' + (pass + fail) + ' 通过');
 if (fail) process.exitCode = 1;
