@@ -1,12 +1,51 @@
 ---
 name: troubleshoot-network
-description: "网络通道抖动/被墙时用它——现象（逐字可搜）：`Recv failure: Connection was reset`、`Failed to connect to github.com port 443 after N ms: Could not connect to server`、`fatal: unable to access 'https://github.com/...': ...`、`could not read Username for 'https://github.com'`、`error: cannot create standard input pipe for remote-https: Permission denied`（exit 255）、`curl: (28) Operation timed out`、`curl: (7) Failed to connect`、`Connection timed out after N milliseconds`、`TLS handshake timeout`、`Client.Timeout exceeded`、`registry-1.docker.io: dial tcp: i/o timeout`。**只适用于链路抖动/不可达**；如果错误是 `Permission denied`/`403`/`404`/`Authentication failed`（权限或凭据问题），或宿主里子进程「没输出、没退出码」（沙箱问题），不要用这一条。"
-whenToUse: "当 git/curl/pnpm/npm/pip/docker 这类**网络动作**报连接被 reset、超时、连不上，或半途卡住时，先读这一条再重试。核心纪律：**不允许静默降级或跳过**——先看平台的网络状态，再用有界的退避重试；git 远端写操作在本机常走不通时，改用 GitHub REST API（`gh api`）发布，而不是反复重试同一条注定失败的姿势。换镜像、换协议、换姿势都可以，唯独不能假装做过了。"
+description: "网络抖动/被墙，或「链路通、git 却失败」时用它——现象（逐字可搜）：`Recv failure: Connection was reset`、`error: RPC failed; curl 28 Recv failure: Connection was reset`、`send-pack: unexpected disconnect while reading sideband packet`、`Failed to clone ... a second time, aborting`、`fatal: unable to access 'https://github.com/...': ...`、`Failed to connect to github.com port 443 after N ms: Could not connect to server`、`fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`、`could not read Username for 'https://github.com'`、`error: cannot create standard input pipe for remote-https: Permission denied`（exit 255）、`curl: (28) Operation timed out`、`TLS handshake timeout`、`registry-1.docker.io: dial tcp: i/o timeout`。进来先分三岔：**链路 / git 本机配置 / 凭据（`gh auth status`）**；若错误只是 `403`/`404`/`Authentication failed` 且链路通着，就是凭据问题不是这一条；宿主里子进程「没输出、没退出码」走 troubleshoot-windows-sandbox-subprocess。"
+whenToUse: "当 git/curl/pnpm/npm/pip/docker 这类**网络动作**报连接被 reset、超时、连不上、半途卡住，**或链路是通的（`gh api` 能用）而 `git` 就是失败**时，先读这一条再重试。核心纪律：**不允许静默降级或跳过**——先分三岔（链路 / git 本机配置 / 凭据 `gh auth status`），先看平台的网络状态，再用有界的退避重试；`gh api` 只用于**读**，**写远端只有 `git push`**。换镜像、换协议、换姿势都可以，唯独不能假装做过了。"
 ---
 
 # 网络抖动：先看状态，再按纪律重试，最后换姿势
 
-这一条治的是**链路**（抖动、被墙、超时）。判据先分清邻居：
+## 什么时候用这一条（when to use）
+
+**症状可以先逐字搜**——下面每一串都是原文，不是转述：
+
+**链路**（连接层失败 / 超时 / 半途断开）：
+
+- `Recv failure: Connection was reset`
+- `error: RPC failed; curl 28 Recv failure: Connection was reset`
+- `send-pack: unexpected disconnect while reading sideband packet`
+- `fatal: unable to access 'https://github.com/...': ...`
+- `Failed to connect to github.com port 443 after N ms: Could not connect to server`
+- `Failed to clone ... a second time, aborting`
+- `curl: (28) Operation timed out` / `curl: (7) Failed to connect`
+- `Connection timed out after N milliseconds` / `TLS handshake timeout` / `Client.Timeout exceeded`
+- `registry-1.docker.io: dial tcp: i/o timeout`
+
+**git 本机配置**（链路很可能是通的）：
+
+- `fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`
+- 或者干脆**没有任何"网络"字样**：同一个 `github.com` 上 **`gh api` 通、`git` 不通** → 别急着说"是权限问题"（见 §2）
+
+**凭据**（前提是链路已证通）：
+
+- `could not read Username for 'https://github.com'`、`403`、`404`、`Authentication failed` → **第一手段 `gh auth status`**，不是本条
+
+**沙箱**（不是本条）：`error: cannot create standard input pipe for remote-https: Permission denied`（exit 255）
+→ `troubleshoot-windows-sandbox-subprocess`。
+
+**进来第一步就是分三岔**，不要一律当网络：
+
+| 岔 | 先做这个判据 | 去哪 |
+|---|---|---|
+| **链路** | `curl -sS -o NUL -w '%{http_code}' --max-time 15 https://github.com` 得 `000`；或 `api.github.com` 也超时 | §0 → §1 → §2「DNS 首位答案」 |
+| **git 本机配置** | 链路通（`api.github.com` `200`）但 `git` 失败；`git config --get http.sslBackend` / `--get http.sslVerify` 有异常值 | §2「分三岔」 |
+| **凭据** | 链路通、`gh api` 通，且报的是 `403`/`404`/`Authentication failed`/`could not read Username` | `gh auth status` + token 范围（不是本条） |
+
+> **注意**：`gh api` 通而 `git` 不通，**只说明这两条链路不同**，**不构成"是权限问题"的证据**——
+> 本机实测过整轮都是"`api.github.com` `200` / `git` 全部 reset"。先按上表逐岔排除。
+
+这一条治的是**链路**（抖动、被墙、超时），也顺手分诊 git 本机配置与凭据。判据先分清邻居：
 
 | 你看到的 | 是哪一类 | 去哪 |
 |---|---|---|
@@ -60,6 +99,49 @@ echo "GIVING UP after 5 attempts"; exit 1
 这台机器上**常见**的现象是：`git clone/fetch/pull/push/ls-remote` 一律 reset/超时，
 而**同一时刻** `gh api` 是通的（两条链路不同）。
 
+### 分三岔：链路 / git 本机配置 / 凭据（**别一律当网络**）
+
+同一句 `Recv failure: Connection was reset` 可以来自三种完全不同的原因，处置也完全不同。
+先看**本机实测的 `~/.gitconfig`**（`C:\Users\Administrator\.gitconfig`，2026-10-13 抄录）：
+
+```ini
+[http]
+	postBuffer = 524288000
+	sslBackend = openssl      # 第 13 行
+	sslVerify = false         # 第 14 行
+
+[credential "https://github.com"]
+	helper =
+	helper = !'C:\Program Files\GitHub CLI\gh.exe' auth git-credential   # 第 19 行
+```
+
+**岔 1 · 链路** → 就是上面 §0 / §1 那一套；DNS 层面的补充见本节「DNS 首位答案落到不通的 IP」。
+
+**岔 2 · git 本机配置**（链路通、`git` 仍失败）：
+
+- `sslBackend = openssl`：Windows 版 git 自带后端是 `schannel`，写 `openssl` **理论上是隐患**——
+  理论上该看到 `fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`。
+  ★ **但本机没能复现**（`references/observed.md` 里标了 `[复现失败]`）：不加任何 `-c` 覆盖、裸跑
+  `git ls-remote https://github.com/laituli/dsh-stable-network.git HEAD`（`git version 2.50.1.windows.1`）
+  **成功，exit 0**。
+  所以这里只写成"**理论隐患 + 若真看到这条报错就这么绕**"，
+  **不是**"本机任何 https git 命令都会 fatal"。真撞上时临时覆盖一次即可：
+
+  ```sh
+  git -c http.sslBackend=schannel clone <url>     # 或 ls-remote / fetch / push
+  ```
+
+- ⚠️ **告警：`sslVerify = false` 是全局关掉了 TLS 证书校验。** 这是**安全风险**，不是"省事的兼容开关"：
+  它让你**失去对端的身份认证**（中间人可被直接接受）。和下面「把 IP 写死」叠加时更糟——
+  IP 是你指定的、证书又不校验，等于两端都不可信。要持久化改配置**只能写 `~/.gitconfig`（用户级）且先问用户**，
+  **不许**写进任何仓内文件。
+
+**岔 3 · 凭据**：本机 github 的 git 凭据交给 `gh`（上面那段 `[credential]`）。
+所以判断凭据的**第一手段是 `gh auth status`**——本机实测输出：
+`✓ Logged in to github.com account laituli (keyring)`，`Token scopes: 'gist', 'read:org', 'repo', 'workflow'`。
+凭据侧和网络侧是**分开的两件事**：`gh api` 通、`git` 不通**不能**证明是权限问题
+（更常见的是这条 git 链路挂了）。
+
 ### 红线：写远端**只有 git 直推**这一条
 
 > **分叉是不可接受的。** 两端必须停在**同一个 commit 号**上。
@@ -76,6 +158,75 @@ echo "GIVING UP after 5 attempts"; exit 1
 为什么把 `git/ref` 也算"写"：ref 只能指向**远端已有**的对象。本地 commit 还没上传时
 `PATCH git/refs/heads/<b>` 会直接 `422 Object does not exist` ——**这条 422 正好证明了
 "没上传就没有写"**，别把它当成"换个姿势就能绕过去"。
+
+### 注意事项：`git submodule sync` 会改写 submodule 自己的 `remote.origin.url`
+
+它不是只动父仓 `.git/config`——**submodule 自己的 `remote.origin.url` 也会被重写成
+`.gitmodules` 里的值**。之后**随便一条 `git fetch` 就会打到远端**（本轮真因此误发过一次
+github 的**只读**请求）。这是"无意出网"的经典破口。
+
+本机实测（本地 `file://` 路径仓库、不联网）：
+
+```
+$ git -C sub remote set-url origin https://github.com.example.invalid/decoy.git
+$ git -C sub config --get remote.origin.url
+https://github.com.example.invalid/decoy.git
+$ git submodule sync
+Synchronizing submodule url for 'sub'
+$ git -C sub config --get remote.origin.url     # ← 被改回去了
+E:\...\sync-demo2\sub.git
+```
+
+**纪律：动 `sync` 之前先知道它会写哪些 config。**
+
+```sh
+git config -f .gitmodules --get-regexp '^submodule\..*\.(url|path)$'   # 它准备写成什么
+git config --local --get-regexp '^submodule\..*\.url$'                # 当前值会不会被改掉
+```
+
+不想出网就先别 `sync`——**你以为在整理本地配置，实际在给后续每一条 fetch 换目的地。**
+
+### DNS 首位答案落到不通的 IP（间歇性）：诊断三连 + 纯命令行绕法
+
+`github.com` 的 DNS **首位答案**可能落到一个连不上的 IP（本轮见过 `20.205.243.166`，同一轮里
+`api.github.com` 是通的）⇒ **`gh api` 能用、`git` 不能用，这不代表是权限问题。**
+
+症状原文（本轮）：
+
+```
+fatal: unable to access 'https://github.com/<o>/<r>/': Recv failure: Connection was reset
+error: RPC failed; curl 28 Recv failure: Connection was reset
+send-pack: unexpected disconnect while reading sideband packet
+Failed to connect to github.com port 443 after 21108 ms: Could not connect to server
+```
+
+**诊断三连**（都可逐条跑，判读看输出）：
+
+```powershell
+curl.exe -sS -o NUL -w '%{http_code}' --max-time 15 https://github.com        # 不通时是 000
+Resolve-DnsName github.com -Type A                                            # 看首位答案
+curl.exe --resolve github.com:443:<ip> -sS -o NUL -w '%{http_code}' --max-time 15 https://github.com   # 逐个 IP 试
+```
+
+**绕法（纯命令行、不落盘）**：
+
+```sh
+git -c http.curloptResolve=github.com:443:<ip> push -u origin main
+```
+
+> 该配置键确实存在（`git help --config` 里有 `http.curloptResolve`），但**"换 IP 就能推上去"这一步本轮没验过**——
+> 只验到诊断三连与"某个 IP 用 curl 能通"。别把它当保证。
+
+**三条硬规矩**：
+
+1. **绝不许**把 IP / 代理 / `curloptResolve` 写进**任何仓内文件**（`.gitmodules`、代码、README 都不行）。
+   要持久化**只能写 `~/.gitconfig`（用户级），且先问用户**；
+2. 这条路由**会抖**：本轮见过的三个 IP 里两个时通时断，**单 IP 不可靠**，长期应上稳定代理；
+3. 这是**间歇**故障：父代理随后**裸跑直连又成功了**（本代理复核：`curl https://github.com` → `200`，
+   裸跑 `git ls-remote` 也 exit 0）。**不要写成「github 一定不通」。**
+
+**顺手记下的现成事实**：`gitee.com` 实测可达（裸跑 `git ls-remote https://gitee.com/<o>/<r>.git HEAD`
+成功），可以当**镜像 / 备用远端**；但它**不能**用来"把写操作绕过去"（那会制造分叉，见上面的红线）。
 
 ### push 失败时的动作，只有三步
 

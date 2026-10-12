@@ -98,3 +98,80 @@ gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment
 | `cannot create standard input pipe ... Permission denied`（exit 255） | 沙箱 | 见 `troubleshoot-windows-sandbox-subprocess` |
 | `Access is denied` / 退出码 `3221225794`（子进程起不来） | 沙箱 | 同上 |
 | `gh: ... set the GH_TOKEN environment variable` | 用法 | 补 env，不是网络也不是权限 |
+
+---
+
+## 本轮追加证据（2026-10-13）
+
+> **分级口径，三级不混写**：
+> **`[实测]`** = 本代理在本机亲自跑出、下面贴了原文；**`[复现失败]`** = 按某个结论去复现，但本机**没出现**该现象；
+> **`[转述]`** = 只有父代理/他人的结论，本代理**未复现**（可能为真，但不作为事实采信）。
+
+### 现象五：`~/.gitconfig` 的 `[http]` 段带 `sslBackend = openssl` + `sslVerify = false`
+
+- `[实测]` `C:\Users\Administrator\.gitconfig` 第 12–14 行：
+
+  ```ini
+  [http]
+  	postBuffer = 524288000
+  	sslBackend = openssl
+  	sslVerify = false
+  ```
+
+- `[实测]` `git --version` → `git version 2.50.1.windows.1`；`git config --get http.sslBackend` → `openssl`；
+  `git config --get http.sslVerify` → `false`（**是生效值**，不只是文件里那么写着）。
+- `[复现失败]` **没能复现** `fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`：
+  裸跑（**不加** `-c http.sslBackend=schannel`）
+  `git ls-remote https://github.com/laituli/dsh-stable-network.git HEAD` →
+  输出 `91857f485b838cb9040e03bbac07ecdc827217bb	HEAD`，`exit 0`；
+  同一份"脏"配置下 `git ls-remote https://gitee.com/laituli/dsh-stable-network.git HEAD` 也 `exit 0`。
+  ⇒ **只能写成"理论隐患 + 若真看到这条报错就用 `-c http.sslBackend=schannel` 绕一次"**，
+  **不能**写成"本机任何 https git 命令都会 fatal"。
+- ⚠️ **告警**：`sslVerify = false` = 全局关闭 TLS 证书校验，**失去对端身份认证**（安全风险）；
+  与"把 IP 写死"叠加时等于两端都不可信。要改就走 `~/.gitconfig`（用户级）并先问用户，**不许**写进仓内文件。
+
+### 现象六：`github.com` 的 DNS 首位答案可能落到不通的 IP（间歇性）
+
+- `[实测]` 2026-10-13 本代理复核时链路是**通的**：
+  `curl -sS -o NUL -w '%{http_code}' --max-time 15 https://github.com` → `200`；
+  `https://api.github.com` → `200`（`%{time_total}` = `0.337381`）；
+  `Resolve-DnsName github.com -Type A` 首位答案 = `20.205.243.166`；
+  `curl --resolve github.com:443:20.205.243.166` → `200`（`0.686636`）；
+  裸跑 `git ls-remote https://github.com/laituli/dsh-stable-network.git HEAD` → `exit 0`。
+- `[转述]` 父代理在同一台机器上遇到的原文（本代理**未复现**，但与"间歇"结论一致）：
+
+  ```
+  fatal: unable to access 'https://github.com/<o>/<r>/': Recv failure: Connection was reset
+  error: RPC failed; curl 28 Recv failure: Connection was reset
+  send-pack: unexpected disconnect while reading sideband packet
+  Failed to connect to github.com port 443 after 21108 ms: Could not connect to server
+  ```
+
+- `[转述]` 父代理的判读：当时 `api.github.com` 是通的（curl 200 / 0.5s），于是 `gh api` 能用而 `git` 不能用——
+  这**不能**证明是权限问题；三个候选 IP 里两个时通时断 ⇒ **单 IP 不可靠，长期应上稳定代理**。
+- `[实测]` `gitee.com` 可达：裸跑 `git ls-remote https://gitee.com/laituli/dsh-stable-network.git HEAD`
+  → `91857f485b838cb9040e03bbac07ecdc827217bb	HEAD`，`exit 0`。
+  （**未核实** gitee 上那份是不是镜像/同一内容，只记"可达、可当备用远端"。）
+- `[实测]` 绕法要用的配置键存在：`git help --config` 输出里含 `http.curloptResolve`。
+- `[转述]` 绕法本身：`git -c http.curloptResolve=github.com:443:<ip> push -u origin main`——
+  **本代理未验证"换 IP 就能 push 成功"**（本轮不许 push，也没有失败现场可试）。
+
+### 现象七：`git submodule sync` 会改写 submodule 自己的 `remote.origin.url`
+
+- `[实测]` 本代理在临时目录用本地 `file://` 仓库复现（**全程不联网**）：
+  `git -C sub remote set-url origin https://github.com.example.invalid/decoy.git` 之后
+  `git -C sub config --get remote.origin.url` = decoy；执行 `git submodule sync`
+  （输出 `Synchronizing submodule url for 'sub'`）之后，同一条命令**又变回 `.gitmodules` 里的值**
+  （本地路径 `E:\dev\Github\.dsh-tmp\p62skill\sync-demo2\sub.git`）。
+  ⇒ 确认：`sync` **不只动父仓**，submodule 自己的 `remote.origin.url` 一起被改写。
+- `[转述]` 后果描述（父代理）：之后**随便一条 `git fetch` 就会打到远端**，本轮真因此误发过一次
+  github 的**只读**请求。本代理未复现这条"误出网"的具体现场。
+
+### 对照表补充
+
+| 现象 | 类别 | 一句话处置 |
+|---|---|---|
+| `fatal: Unsupported SSL backend 'openssl'...` | git 本机配置 | **`[复现失败]`** 本机没出现；真出现就 `-c http.sslBackend=schannel` 绕一次 |
+| `gh api` 通、`git` 不通（且无 `403/404/Authentication failed`） | 链路（很可能是） | **不能**判成权限；先按 SKILL.md §2「分三岔」逐岔排除 |
+| `error: RPC failed; curl 28 ...` / `send-pack: unexpected disconnect ...` | 网络 | 与 `Recv failure` 同级：有界退避 + 查 DNS 首位答案 |
+| `git submodule sync` 之后 fetch 打到了别的远端 | git 本机配置 | `sync` 会改 submodule 的 `remote.origin.url`；动之前先 `git config -f .gitmodules --get-regexp` |
