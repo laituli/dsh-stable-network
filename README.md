@@ -44,9 +44,12 @@ dsh plugin --profile web add https://github.com/laituli/dsh-stable-network.git
 - 装在 `skills/troubleshoot-network/`，由 `lib/index.js` 经 `ctx.inject(['skills'])` →
   `ctx.skills.registerProvider()` 交给宿主（**不是**目录自动发现——DSH 没有那套；不注册就永远不出现）；
 - 触发词写在 `description` 里（逐字可搜：`Recv failure: Connection was reset`、
-  `Failed to connect to github.com port 443`、`could not read Username`、`curl: (28) Operation timed out`…）；
+  `error: RPC failed; curl 28 Recv failure: Connection was reset`、`send-pack: unexpected disconnect while reading sideband packet`、
+  `fatal: Unsupported SSL backend 'openssl'`、`Failed to connect to github.com port 443`、
+  `could not read Username`、`curl: (28) Operation timed out`…）；
 - 正文给的是 **agent 真能执行**的东西：先 `curl -s http://127.0.0.1:<宿主端口>/dsh-stable-network/status`
-  看平台认不认这条链路 → 有界退避重试 → **git 远端写不动时改用 `gh api` Contents API 发布**（本机实测最有用的一条）；
+  看平台认不认这条链路 → **先分三岔（链路 / git 本机配置 / 凭据 `gh auth status`）** → 有界退避重试
+  → `gh api` **只许用于读**；**写远端只有 `git push`**（禁用 Contents API 写远端——它会制造分叉，见正文红线）；
 - **诚实边界**：`runStrict` / `enqueue` / `onRecovered` 是**宿主侧代码**调用的 API，DSH 没有把插件 service
   暴露成 agent 工具，所以 skill 不承诺"自动补做"，只教纪律与替代姿势（正文有"别指望自动补做"一节）。
 
