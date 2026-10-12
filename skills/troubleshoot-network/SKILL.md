@@ -1,7 +1,7 @@
 ---
 name: troubleshoot-network
-description: "网络抖动/被墙，或「链路通、git 却失败」时用它——现象（逐字可搜）：`Recv failure: Connection was reset`、`error: RPC failed; curl 28 Recv failure: Connection was reset`、`send-pack: unexpected disconnect while reading sideband packet`、`Failed to clone ... a second time, aborting`、`fatal: unable to access 'https://github.com/...': ...`、`Failed to connect to github.com port 443 after N ms: Could not connect to server`、`fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`、`could not read Username for 'https://github.com'`、`error: cannot create standard input pipe for remote-https: Permission denied`（exit 255）、`curl: (28) Operation timed out`、`TLS handshake timeout`、`registry-1.docker.io: dial tcp: i/o timeout`。进来先分三岔：**链路 / git 本机配置 / 凭据（`gh auth status`）**；若错误只是 `403`/`404`/`Authentication failed` 且链路通着，就是凭据问题不是这一条；宿主里子进程「没输出、没退出码」走 troubleshoot-windows-sandbox-subprocess。"
-whenToUse: "当 git/curl/pnpm/npm/pip/docker 这类**网络动作**报连接被 reset、超时、连不上、半途卡住，**或链路是通的（`gh api` 能用）而 `git` 就是失败**时，先读这一条再重试。核心纪律：**不允许静默降级或跳过**——先分三岔（链路 / git 本机配置 / 凭据 `gh auth status`），先看平台的网络状态，再用有界的退避重试；`gh api` 只用于**读**，**写远端只有 `git push`**。换镜像、换协议、换姿势都可以，唯独不能假装做过了。"
+description: "网络抖动/被墙，或「链路通、git 却失败」时用它——现象（逐字可搜）：`Recv failure: Connection was reset`、`error: RPC failed; curl 28 Recv failure: Connection was reset`、`send-pack: unexpected disconnect while reading sideband packet`、`Failed to clone ... a second time, aborting`、`fatal: unable to access 'https://github.com/...': ...`、`Failed to connect to github.com port 443 after N ms: Could not connect to server`、`fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`、`fatal: remote helper 'https' aborted session`、`could not read Username for 'https://github.com'`、`error: cannot create standard input pipe for remote-https: Permission denied`（exit 255）、`curl: (28) Operation timed out`、`TLS handshake timeout`、`registry-1.docker.io: dial tcp: i/o timeout`。进来先分三岔：**链路 / git 本机配置 / 凭据（`gh auth status`）**；若错误只是 `403`/`404`/`Authentication failed` 且链路通着，就是凭据问题不是这一条；宿主里子进程「没输出、没退出码」走 troubleshoot-windows-sandbox-subprocess。★ 处置顺序：先看平台状态 → 诊断三连 → **先用普通推做有界退避**（往往就成）→ 普通推连续失败才谈换姿势，而 `http.curloptResolve` 那条 IP 绕法在 push 上**已被证伪**。"
+whenToUse: "当 git/curl/pnpm/npm/pip/docker 这类**网络动作**报连接被 reset、超时、连不上、半途卡住，**或链路是通的（`gh api` 能用）而 `git` 就是失败**时，先读这一条再重试。核心纪律：**不允许静默降级或跳过**——先分三岔（链路 / git 本机配置 / 凭据 `gh auth status`），先看平台的网络状态，再用有界的退避重试；`gh api` 只用于**读**，**写远端只有 `git push`**。★ 写远端失败时**先用普通推做有界退避**（实测常常第 1 次就成），**别先改路由**——`http.curloptResolve` 那条 IP 绕法在 push 上已证伪。换镜像、换协议、换姿势都可以，唯独不能假装做过了。"
 ---
 
 # 网络抖动：先看状态，再按纪律重试，最后换姿势
@@ -25,6 +25,8 @@ whenToUse: "当 git/curl/pnpm/npm/pip/docker 这类**网络动作**报连接被 
 **git 本机配置**（链路很可能是通的）：
 
 - `fatal: Unsupported SSL backend 'openssl'. Supported SSL backends: schannel`
+- `fatal: remote helper 'https' aborted session`（exit 128）——**常出现在"用 `-c http.curloptResolve=` 改路由"之后**，
+  见 §2「IP 绕法：`[复现失败/证伪]`」
 - 或者干脆**没有任何"网络"字样**：同一个 `github.com` 上 **`gh api` 通、`git` 不通** → 别急着说"是权限问题"（见 §2）
 
 **凭据**（前提是链路已证通）：
@@ -186,10 +188,10 @@ git config --local --get-regexp '^submodule\..*\.url$'                # 当前�
 
 不想出网就先别 `sync`——**你以为在整理本地配置，实际在给后续每一条 fetch 换目的地。**
 
-### DNS 首位答案落到不通的 IP（间歇性）：诊断三连 + 纯命令行绕法
+### DNS 首位答案落到不通的 IP（间歇性）：先普通推退避，IP 绕法**已证伪**
 
-`github.com` 的 DNS **首位答案**可能落到一个连不上的 IP（本轮见过 `20.205.243.166`，同一轮里
-`api.github.com` 是通的）⇒ **`gh api` 能用、`git` 不能用，这不代表是权限问题。**
+`github.com` 的 DNS **首位答案**可能落到一个连不上的 IP（本轮见过一个不通的首位答案，具体读数见
+`references/observed.md`；同一轮里 `api.github.com` 是通的）⇒ **`gh api` 能用、`git` 不能用，这不代表是权限问题。**
 
 症状原文（本轮）：
 
@@ -200,6 +202,16 @@ send-pack: unexpected disconnect while reading sideband packet
 Failed to connect to github.com port 443 after 21108 ms: Could not connect to server
 ```
 
+★ **处置顺序（2026-10-13 修正，别跳步）**：
+
+1. §0 看平台状态（`online` / `consecutiveFails`）——平台说 `online:true` 就说明这次多半是瞬时的；
+2. 诊断三连（下面）；
+3. ★ **先用普通推做有界退避**（§1 那条：2s→4s→8s，最多 3–5 次）——**这一步往往就成**。
+   同一次故障里的实测：`github.com` 直连 `curl` = **`000`**（`curl: (28) Connection timed out after 15008 ms`）、
+   DNS 首位答案那个 IP **不通**，可是 **`git push origin master:master` 第 1 次就成功**
+   （`7b4554a..25cfb2b`）——同一时刻 `api.github.com` `200`、`gitee` `200`、`ls-remote origin` 能读回；
+4. ✅ **只有普通推连续失败之后**，才考虑下面的 IP 绕法——**而它本次已被证伪**（见下），所以连"第二姿势"都算不上。
+
 **诊断三连**（都可逐条跑，判读看输出）：
 
 ```powershell
@@ -208,14 +220,22 @@ Resolve-DnsName github.com -Type A                                            # 
 curl.exe --resolve github.com:443:<ip> -sS -o NUL -w '%{http_code}' --max-time 15 https://github.com   # 逐个 IP 试
 ```
 
-**绕法（纯命令行、不落盘）**：
+**IP 绕法：`[复现失败/证伪]`（2026-10-13 实测，别再当成解法）**
 
 ```sh
-git -c http.curloptResolve=github.com:443:<ip> push -u origin main
+git -c http.curloptResolve=github.com:443:<ip> push
 ```
 
-> 该配置键确实存在（`git help --config` 里有 `http.curloptResolve`），但**"换 IP 就能推上去"这一步本轮没验过**——
-> 只验到诊断三连与"某个 IP 用 curl 能通"。别把它当保证。
+- ❌ **在 push 上被证伪**：`git -c http.curloptResolve=github.com:443:<ip> push`
+  ⇒ **`fatal: remote helper 'https' aborted session`（exit 128）**；
+- ⚠️ **同一个 IP** 上 `curl.exe --resolve github.com:443:<ip> -o NUL -w '%{http_code}' https://github.com`
+  却是 **`200`**（被测 IP 的实测读数见 `references/observed.md`）；
+- ⇒ 结论：**这个键能让 curl 通、不能让 git push 通**。别再把"curl 通了"当作"push 能过"的证据；
+- ★ **操作坑**：**不要同时传两个 `http.curloptResolve`**——第一个若没写全 IP，会直接 abort。
+
+> 该配置键确实存在（`git help --config` 里有 `http.curloptResolve`），但它**现在是一条被证伪的绕法**：
+> 只验到"诊断三连 + 某个 IP 用 curl 能通"，**没有任何一次 push 靠它成功过**。
+> 先老老实实走第 3 步的普通推有界退避。
 
 **三条硬规矩**：
 
@@ -224,14 +244,19 @@ git -c http.curloptResolve=github.com:443:<ip> push -u origin main
 2. 这条路由**会抖**：本轮见过的三个 IP 里两个时通时断，**单 IP 不可靠**，长期应上稳定代理；
 3. 这是**间歇**故障：父代理随后**裸跑直连又成功了**（本代理复核：`curl https://github.com` → `200`，
    裸跑 `git ls-remote` 也 exit 0）。**不要写成「github 一定不通」。**
+   ★ 更硬的一条读数：同一次故障里 **`git push` 第 1 次就成功**（见上面的处置顺序第 3 步）——
+   ⇒ **"诊断三连全红"不等于"推不上去"**，先推一次再谈换姿势。
 
 **顺手记下的现成事实**：`gitee.com` 实测可达（裸跑 `git ls-remote https://gitee.com/<o>/<r>.git HEAD`
 成功），可以当**镜像 / 备用远端**；但它**不能**用来"把写操作绕过去"（那会制造分叉，见上面的红线）。
 
 ### push 失败时的动作，只有三步
 
+> ★ 这三步**先于**任何 IP / 路由类绕法：第 1 步就是普通推退避，**别跳过它直接去改路由**。
+
 1. **有界退避重试**（§1 的纪律：2s→4s→8s，最多 3–5 次）。链路**会**自己恢复——
    实测同一批命令先全部 reset/超时，几分钟后 `git ls-remote` 与 `git push --force` 又都通了；
+   ★ 而同一次故障里 `git push origin master:master` **第一次就成功**——所以"诊断三连全红"时也要真推一次；
 2. 还不通 → **停手**，把「本地 HEAD / 远端 HEAD / 失败的原文」写进报告，明确标成**未完成、已阻塞**；
 3. 等链路恢复后**先比号再推**：
 

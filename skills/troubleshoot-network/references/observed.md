@@ -153,8 +153,9 @@ gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment
   → `91857f485b838cb9040e03bbac07ecdc827217bb	HEAD`，`exit 0`。
   （**未核实** gitee 上那份是不是镜像/同一内容，只记"可达、可当备用远端"。）
 - `[实测]` 绕法要用的配置键存在：`git help --config` 输出里含 `http.curloptResolve`。
-- `[转述]` 绕法本身：`git -c http.curloptResolve=github.com:443:<ip> push -u origin main`——
-  **本代理未验证"换 IP 就能 push 成功"**（本轮不许 push，也没有失败现场可试）。
+- ★ `[复现失败/证伪]` 绕法本身：`git -c http.curloptResolve=github.com:443:<ip> push`——
+  **2026-10-13 在 push 上被证伪**（`fatal: remote helper 'https' aborted session`，exit 128），
+  而**同一个 IP** 的 `curl --resolve` 是 `200`。逐字读数见下面「现象八」。
 
 ### 现象七：`git submodule sync` 会改写 submodule 自己的 `remote.origin.url`
 
@@ -175,3 +176,58 @@ gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment
 | `gh api` 通、`git` 不通（且无 `403/404/Authentication failed`） | 链路（很可能是） | **不能**判成权限；先按 SKILL.md §2「分三岔」逐岔排除 |
 | `error: RPC failed; curl 28 ...` / `send-pack: unexpected disconnect ...` | 网络 | 与 `Recv failure` 同级：有界退避 + 查 DNS 首位答案 |
 | `git submodule sync` 之后 fetch 打到了别的远端 | git 本机配置 | `sync` 会改 submodule 的 `remote.origin.url`；动之前先 `git config -f .gitmodules --get-regexp` |
+| `fatal: remote helper 'https' aborted session`（exit 128） | **换姿势失败（不是网络本身）** | 多半是 `-c http.curloptResolve=` 改路由导致；**改用普通推重试**（见现象八） |
+
+---
+
+## 第二轮追加证据（2026-10-13，父代理实测，P78 回灌）
+
+> ★ **这两条是历史实测读数，不是配置建议**：里面的 IP 只用于说明"当时测到的是哪些地址"，
+> **不得**据此写死到任何 `~/.gitconfig`、`.gitmodules`、代码或代理设置里。
+
+### 现象八：`http.curloptResolve` 的 IP 绕法**在 push 上被证伪**（curl 通 ≠ git push 通）
+
+- `[实测]` 命令与原文（exit 128）：
+
+  ```
+  $ git -c http.curloptResolve=github.com:443:20.27.177.113 push
+  fatal: remote helper 'https' aborted session
+  ```
+
+  （同一条命令对被测 IP `20.27.177.113` / `4.237.22.38` 都是这个结果，`exit 128`。）
+
+- `[实测]` **同一个 IP** 走 curl 却是通的：
+
+  ```
+  $ curl.exe --resolve github.com:443:20.27.177.113 -o NUL -w '%{http_code}' https://github.com
+  200
+  ```
+
+- ⇒ **判读**：这个配置键**能让 curl 通、不能让 git push 通**。
+  它**不是** push 的解法——"curl 试通了某个 IP"**推不出**"git push 能过"。
+  （键本身存在：`git help --config` 里有 `http.curloptResolve`；问题在它和 git 的 https remote helper 配合不上。）
+- ★ `[实测]` **操作坑**：**不要同时传两个 `http.curloptResolve`**。
+  第一个若没写全 IP，`git` 会**直接 abort**（父代理踩过；报错同上）。
+- **正确的先后顺序**：push 不通时 ★ **先普通推做有界退避**（见现象九），
+  **只有普通推连续失败之后**才轮到"换姿势"，而这条姿势已经出局。
+
+### 现象九：同一次故障里，"普通推"**第 1 次就成功**
+
+- `[实测]` 同一轮的链路读数（这是**间歇**故障的现场，别读成"github 一定不通"）：
+
+  | 探针 | 读数 |
+  |---|---|
+  | 平台状态端点 | `{"online":true,"consecutiveFails":0,...}` |
+  | `curl https://github.com`（直连） | **`000`**，`curl: (28) Connection timed out after 15008 ms` |
+  | `Resolve-DnsName github.com -Type A` 首位答案 | **`20.205.243.166`** ⇒ 该 IP **不通** |
+  | `curl https://api.github.com` | **`200`** |
+  | `curl https://gitee.com` | **`200`** |
+  | `git ls-remote origin` | 能读回 |
+  | ★ **`git push origin master:master`** | ✅ **第 1 次就成功**：`7b4554a..25cfb2b` |
+
+- ⇒ **判读**：诊断三连**全红**（`github.com` 直连 `000` + 首位答案 IP 不通）**并不等于"推不上去"**。
+  平台状态 `online:true` / `consecutiveFails:0` 与"普通推一次就成"是一致的——
+  所以**先把普通推试掉**，再谈换姿势。
+- **口径修正（已写回 SKILL.md §2）**：处置顺序 = §0 平台状态 → 诊断三连 → ★ **普通推有界退避（往往就成）**
+  → **普通推连续失败后**才考虑 IP 绕法，而 IP 绕法在本轮**被证伪**。
+
